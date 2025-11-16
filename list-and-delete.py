@@ -174,6 +174,10 @@ def get_resources_by_tag(client, resource_type: str, tag_key: str, tag_value: st
             response = client.describe_volumes(Filters=[{'Name': f'tag:{tag_key}', 'Values': [tag_value]}])
             return response.get('Volumes', [])
 
+        elif resource_type == 'launch_templates':
+            response = client.describe_launch_templates(Filters=[{'Name': f'tag:{tag_key}', 'Values': [tag_value]}])
+            return response.get('LaunchTemplates', [])
+
         elif resource_type == 'iam_roles':
             paginator = client.get_paginator('list_roles')
             tagged_roles = []
@@ -227,6 +231,29 @@ def get_resources_by_tag(client, resource_type: str, tag_key: str, tag_value: st
                     #print(group)
                     tagged_logs.append(group)
             return tagged_logs
+
+        elif resource_type == 'sqs_queues':
+            response = client.list_queues()
+            queue_urls = response.get('QueueUrls', [])
+            tagged_queues = []
+            for queue_url in queue_urls:
+                if tag_value in queue_url:
+                    #print(f"checking {queue_url}")
+                    # Get queue attributes and tags
+                    queue_tags = client.list_queue_tags(QueueUrl=queue_url)
+                    # Check if queue has the specified tag
+                    if 'Tags' in queue_tags:
+                        tags = queue_tags['Tags']
+                        if tag_key in tags and tags[tag_key] == tag_value:
+                            # Add queue URL and attributes to the result
+                            queue_attrs = client.get_queue_attributes(QueueUrl=queue_url, AttributeNames=['All'])
+                            queue_info = {
+                                'QueueUrl': queue_url,
+                                'Arn': queue_attrs['Attributes']['QueueArn'],
+                                'Attributes': queue_attrs['Attributes']
+                            }
+                            tagged_queues.append(queue_info)
+            return tagged_queues
 
     except ClientError as e:
         print(f"Error getting {resource_type}: {e}")
@@ -293,6 +320,9 @@ def delete_resource(client, resource_type: str, resource: Dict) -> bool:
         elif resource_type == 'volumes':
             client.delete_volume(VolumeId=resource['VolumeId'])
 
+        elif resource_type == 'launch_templates':
+            client.delete_launch_template(LaunchTemplateId=resource['LaunchTemplateId'])
+
         elif resource_type == 'openid_connect_providers':
             client.delete_open_id_connect_provider(OpenIDConnectProviderArn=resource['Arn'])
    
@@ -328,6 +358,9 @@ def delete_resource(client, resource_type: str, resource: Dict) -> bool:
 
         elif resource_type == "managed_policies":
             client.delete_policy(PolicyArn=resource['Arn'])
+
+        elif resource_type == 'sqs_queues':
+            client.delete_queue(QueueUrl=resource['QueueUrl'])
         
         print(f"Deleted {resource_type}: {resource.get('Arn', resource.get('Id', resource.get('Name', str(resource))))}")
         return True
@@ -345,6 +378,7 @@ def list_and_manage_resources(tag_key: str, tag_value: str, region: str, delete:
     kms_client = boto3.client("kms", region_name=region)
     log_client = boto3.client("logs", region_name=region)
     elb_classic_client = boto3.client('elb', region_name=region)
+    sqs_client = boto3.client('sqs', region_name=region)
 
     # Get VPC IDs first to filter load balancers
     vpc_ids = [vpc['VpcId'] for vpc in get_resources_by_tag(ec2_client, 'vpcs', tag_key, tag_value)]
@@ -364,7 +398,9 @@ def list_and_manage_resources(tag_key: str, tag_value: str, region: str, delete:
         ('subnets', ec2_client),
         ('route_tables', ec2_client),
         ('internet_gateways', ec2_client),
+        ('launch_templates', ec2_client),
         ('security_groups', ec2_client),
+        ('sqs_queues', sqs_client),
         ('log_groups', log_client),
         ('volumes', ec2_client),
         ('network_interfaces', ec2_client),
@@ -405,10 +441,13 @@ def list_and_manage_resources(tag_key: str, tag_value: str, region: str, delete:
                          resource.get('GroupId') or
                          resource.get('name') or
                          resource.get('VolumeId') or
+                         resource.get('LaunchTemplateId') or
+                         resource.get('LaunchTemplateName') or
                          resource.get('Arn') or
                          resource.get('nodegroupName') or
                          resource.get('RoleName') or
                          resource.get('VpcId') or
+                         resource.get('QueueUrl') or
                          str(resource))
             
             # Special handling for EKS clusters to show VPC ID
