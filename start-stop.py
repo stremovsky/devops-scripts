@@ -167,97 +167,112 @@ class AnyOps:
 
     def listEC2(self, Direction):
         logging.info("List EC2")
-        # Connect to EC2
-        try:
-            awsCli = self._aws_connect(clientAPI='ec2')
-        except Exception as e:
-            logging.error('Failed to connect to EC2 %s' % (e)); exit(1)
-            return False
+        awsCli = self._aws_connect(clientAPI='ec2')
         
-        ids = []
+        spot_instances = []
+        regular_instances = []
+        
         try:
-            # Handle pagination with NextToken
             next_token = None
             while True:
                 params = {}
                 if next_token:
                     params['NextToken'] = next_token
                 
-                a = awsCli.describe_instances(**params)
+                response = awsCli.describe_instances(**params)
                 
-                for reservation in a['Reservations']:
+                for reservation in response['Reservations']:
                     for instance in reservation['Instances']:
-                        # Only process running instances
+                        instance_id = instance['InstanceId']
+                        is_spot = instance.get('InstanceLifecycle') == 'spot'
+                        
+                        # Check if instance should be processed
                         if Direction == 'start':
                             if instance['State']['Name'] == 'running':
                                 continue
-                            ids.append(instance['InstanceId'])
-                            continue
-                        if instance['State']['Name'] != 'running':
-                            # skip if not running
-                            continue
-                        skip = False
-                        # check StackPrefix
-                        if instance['Tags']:
-                            for tag in instance['Tags']:
-                                if tag['Key'] == 'StackPrefix' and tag['Value'] in EXCLUDE_STACK_PREFIX_TAGS:
-                                    logging.info("Skipping EC2: {}".format(instance['InstanceId']))
-                                    skip = True
-                                    break
-                                # parts = tag['Value'].split('_')
-                                # if parts[0] in EXCLUDE_STACK_PREFIX_TAGS:
-                                #     logging.info("Skipping EC2 2: {}, tags: {}".format(instance['InstanceId'], instance['Tags']))
-                                #     skip = True
-                                #     break
-                        if skip == False:
-                            logging.info(f"Adding EC2: {instance['InstanceId']}, tags: {instance['Tags']}")
-                            ids.append(instance['InstanceId'])
+                        else:  # stop
+                            if instance['State']['Name'] != 'running':
+                                continue
+                            
+                            # Check StackPrefix exclusion
+                            skip = False
+                            if instance.get('Tags'):
+                                for tag in instance['Tags']:
+                                    if tag['Key'] == 'StackPrefix' and tag['Value'] in EXCLUDE_STACK_PREFIX_TAGS:
+                                        logging.info("Skipping EC2: {}".format(instance_id))
+                                        skip = True
+                                        break
+                            if skip:
+                                continue
+                        # Add to appropriate list
+                        if is_spot:
+                            spot_instances.append(instance_id)
+                            logging.info("Adding spot EC2: {}".format(instance_id))
+                        else:
+                            regular_instances.append(instance_id)
+                            logging.info("Adding regular EC2: {}".format(instance_id))
                 
-                # Check if there are more pages
-                next_token = a.get('NextToken')
+                next_token = response.get('NextToken')
                 if not next_token:
                     break
-                # Filters=[
-                #     {
-                #         'Name': 'tag:StackPrefix',
-                #         'Values': [
-                #             'no131119'
-                #         ]
-                #     }]
         except Exception as e:
             logging.error('Failed to read EC2 %s' % (e))
-            return False
+            return None, None
 
-        return ids
+        return spot_instances, regular_instances
     
-    def updateEC2(self, EC2List=None, Direction='start'):
+    def updateEC2(self, spot_instances=None, regular_instances=None, Direction='start'):
         awsCli = self._aws_connect(clientAPI='ec2')
-        if self.DRYFLAG:  # if dryrun, only check status
+        
+        if self.DRYFLAG:
             logging.warning("DryRun action!, no modifications made")
-            logging.info("EC2List: {}".format(EC2List))
+            logging.info("Spot instances: {}, Regular instances: {}".format(spot_instances, regular_instances))
             return True
 
         if Direction == 'start':
-            try:
-                awsCli.start_instances(InstanceIds=EC2List)
-                return True
-            except Exception as e:
-                logging.error('Failed to start EC2s %s' % (e))
-                return False
+            all_instances = (spot_instances or []) + (regular_instances or [])
+            if all_instances:
+                try:
+                    awsCli.start_instances(InstanceIds=all_instances)
+                    return True
+                except Exception as e:
+                    logging.error('Failed to start EC2s %s' % (e))
+                    return False
+            return True
 
         if Direction != 'stop':
             return False
-        try:
-            awsCli.stop_instances(InstanceIds=EC2List)
-            return True
-        except Exception as e:
-            logging.error('Failed to stop list of EC2 instances %s' % (e))
-        for instance in EC2List:
+        
+        # Terminate spot instances
+        if spot_instances:
             try:
-                awsCli.stop_instances(InstanceIds=[instance])
+                logging.info("Terminating {} spot instances: {}".format(len(spot_instances), spot_instances))
+                awsCli.terminate_instances(InstanceIds=spot_instances)
             except Exception as e:
-                logging.error('Failed to stop EC2 instance %s' % (e))
-        logging.error('Done')
+                logging.error('Failed to terminate spot instances %s' % (e))
+                for instance in spot_instances:
+                    try:
+                        logging.info("Terminating spot instance: {}".format(instance))
+                        awsCli.terminate_instances(InstanceIds=[instance])
+                    except Exception as e:
+                        logging.error('Failed to terminate spot instance %s' % (e))
+                        continue
+                    break
+        # Stop regular instances
+        if regular_instances:
+            try:
+                logging.info("Stopping {} regular instances: {}".format(len(regular_instances), regular_instances))
+                awsCli.stop_instances(InstanceIds=regular_instances)
+            except Exception as e:
+                logging.error('Failed to stop regular instances %s' % (e))
+                for instance in regular_instances:
+                    try:
+                        logging.info("Stopping regular instance: {}".format(instance))
+                        awsCli.stop_instances(InstanceIds=[instance])
+                    except Exception as e:
+                        logging.error('Failed to stop regular instance %s' % (e))
+                        continue
+                    break
         return True
 
 def lambda_handler(event, context):
@@ -294,18 +309,18 @@ def lambda_handler(event, context):
     asgs = aops.listASG(Direction=actionDircton)
     logging.info("ASGNames: {}".format(asgs))
 
-    k = 0
     for asg in asgs:
-        k += 1
         #logging.info("Try set action {} on {}/{} ASG {}".format(actionDircton, k, len(asgs), asg))
         aops.updateASG(ASGName=asg, Direction=actionDircton)
-    
     for asg in asgs:
         aops.waitASGUpdate(ASGName=asg, Direction=actionDircton)
 
-    ec2s = aops.listEC2(Direction=actionDircton)
-    logging.info("Try set action {} on EC2 instances: {} ASGs".format(actionDircton, len(ec2s), ec2s))
-    if aops.updateEC2(EC2List=ec2s, Direction=actionDircton):
+    spot_ec2s, regular_ec2s = aops.listEC2(Direction=actionDircton)
+    if spot_ec2s is None and regular_ec2s is None:
+        logging.error("Failed to list EC2 instances")
+        return False
+    logging.info("Try set action {} on EC2 instances: {} spot, {} regular".format(actionDircton, len(spot_ec2s), len(regular_ec2s)))
+    if aops.updateEC2(spot_instances=spot_ec2s, regular_instances=regular_ec2s, Direction=actionDircton):
         logging.info("EC2 instances updated successfully")
 
     return True
