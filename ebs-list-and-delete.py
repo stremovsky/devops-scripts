@@ -1,5 +1,6 @@
 
 import json
+import sys
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError, ProfileNotFound
 
@@ -238,6 +239,7 @@ def find_last_instance_from_trail(cloudtrail, volume_id, start_time=None):
 def main():
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("-r", "--region", help="AWS region (e.g. us-east-1)")
+    parser.add_argument("--delete", action="store_true", help="Delete resources (default: dry-run mode)")
     args = parser.parse_args()
 
     region = args.region or default_region or "us-east-1"
@@ -289,8 +291,11 @@ def main():
             ItTag_Creator = get_tag(v.get("Tags"), "ItTag_Creator")
             if sp:
                 if sp not in exclude_vector:
-                    print(f"DELETE {vol_id} StackPrefix={sp}")
-                    #ec2.delete_volume(VolumeId=vol_id)
+                    if args.delete:
+                        print(f"DELETE {vol_id} StackPrefix={sp}")
+                        ec2.delete_volume(VolumeId=vol_id)
+                    else:
+                        print(f"TODO DELETE {vol_id} StackPrefix={sp} (use --delete to actually delete)")
                 else:
                     print(f"GOOD {vol_id} StackPrefix={sp}")
                 continue
@@ -305,16 +310,22 @@ def main():
                             found_eks_cluster = True
                     if not found_eks_cluster:
                         # delete volume
-                        print(f"TODO DELETE {vol_id} VolumeTags={format_tags(v.get('Tags'))}")
-                        ec2.delete_volume(VolumeId=vol_id)
+                        if args.delete:
+                            print(f"DELETE {vol_id} VolumeTags={format_tags(v.get('Tags'))}")
+                            ec2.delete_volume(VolumeId=vol_id)
+                        else:
+                            print(f"TODO DELETE {vol_id} VolumeTags={format_tags(v.get('Tags'))} (use --delete to actually delete)")
                     continue
                 # else:
                 #     print( f"CHECK {vol_id} VolumeTags={format_tags(v.get('Tags'))}")
                 # continue
             if vol_type == "gp2":
                 if ItTag_Creator and "user/jenkins" in ItTag_Creator:
-                    print(f"TODO DELETE gp2 {vol_id} VolumeTags={format_tags(v.get('Tags'))}")
-                    ec2.delete_volume(VolumeId=vol_id)
+                    if args.delete:
+                        print(f"DELETE gp2 {vol_id} VolumeTags={format_tags(v.get('Tags'))}")
+                        ec2.delete_volume(VolumeId=vol_id)
+                    else:
+                        print(f"TODO DELETE gp2 {vol_id} VolumeTags={format_tags(v.get('Tags'))} (use --delete to actually delete)")
                 else:
                     print(f"GOOD gp2 {vol_id} VolumeTags={format_tags(v.get('Tags'))}")
                 continue
